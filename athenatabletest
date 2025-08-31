@@ -1,0 +1,150 @@
+
+
+1. **An Athena table DDL** for this dataset.
+2. **A way to insert data manually** into it.
+
+⚠️ Important: Athena is **serverless & read-only** over data stored in **S3** → it does not support `INSERT INTO ... VALUES` like a relational DB.
+👉 The correct way is:
+
+* Store your records in S3 (CSV/JSON/Parquet/ORC).
+* Point Athena to it using a table definition.
+* If you need "manual inserts", you generate/upload a small JSON/CSV file with the row and Athena will read it.
+
+---
+
+### 1. Athena Table DDL (for your schema)
+
+Here’s a **JSON-friendly schema** so you can keep `object_tags` and `user_metadata` as `map<string,string>`:
+
+```sql
+CREATE EXTERNAL TABLE IF NOT EXISTS s3_metadata_objects (
+    id                   bigint,
+    bucket               string,
+    key                  string,
+    sequence_number      string,
+    version_id           string,
+    is_delete_marker     boolean,
+    size                 bigint,
+    last_modified_date   timestamp,
+    e_tag                string,
+    storage_class        string,
+    is_multipart         boolean,
+    encryption_status    string,
+    is_bucket_key_enabled boolean,
+    kms_key_arn          string,
+    checksum_algorithm   string,
+    object_tags          map<string,string>,
+    user_metadata        map<string,string>
+)
+ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe'
+LOCATION 's3://your-bucket-name/path/to/data/'
+TBLPROPERTIES ('has_encrypted_data'='false');
+```
+
+---
+
+### 2. Example JSON for S3 Upload
+
+Save this JSON file locally (e.g. `records.json`) and upload it to the S3 location you used above:
+
+```json
+[
+  {
+    "id": 1,
+    "bucket": "retention-pks-demo1",
+    "key": "index.html",
+    "sequence_number": "80e8a638c3a27f291871a758aabd92b86f0068a638c3a27f291800000000000000000000000000000000000000000000000072",
+    "version_id": "jpqyQwSm86d1N5Td5jQRtIwq1_8F.IyP",
+    "is_delete_marker": false,
+    "size": 9414592,
+    "last_modified_date": "2025-08-20 21:06:12",
+    "e_tag": "91b61cdac5ffd561aa8b28b8a12af6de",
+    "storage_class": "STANDARD",
+    "is_multipart": false,
+    "encryption_status": "SSE-S3",
+    "is_bucket_key_enabled": false,
+    "kms_key_arn": null,
+    "checksum_algorithm": "CRC32",
+    "object_tags": {},
+    "user_metadata": {}
+  },
+  {
+    "id": 2,
+    "bucket": "retention-pks-demo1",
+    "key": "Actually/Checklist_East_2841OP.pdf",
+    "sequence_number": "80e8a61e2ccd42f27370a67e1f56b5d8940068a61e2ccd42f27300000000000000000000000000000000000000000000000072",
+    "version_id": "RBCOFb2fXbUf8osDi_1E_mXPntKOEnga",
+    "is_delete_marker": false,
+    "size": 2101,
+    "last_modified_date": "2025-08-20 19:12:45",
+    "e_tag": "b38d2dc461a2cb62ae74224fb12d12e0",
+    "storage_class": "STANDARD",
+    "is_multipart": false,
+    "encryption_status": "SSE-S3",
+    "is_bucket_key_enabled": false,
+    "kms_key_arn": null,
+    "checksum_algorithm": "CRC32",
+    "object_tags": {},
+    "user_metadata": {
+      "owner": "Owner_1",
+      "description": "Performance body full get structure. Store cut suddenly land recognize join wear star. Rich second rock still situation general. Decide message letter brother couple including. Discover receive end need. Some reason last response probably talk. Teach up paper show prepare left. Adult by knowledge. At range data forget can class. May recognize win big. Task of air analysis safe. Defense too charge. However follow church manage success important generation. Hard fly page should. Option measure lea",
+      "keyword": "Keyword_17,Keyword_16,Keyword_19,Keyword_15,Keyword_1",
+      "createddate": "2025-08-21 00:42:44"
+    }
+  },
+  {
+    "id": 3,
+    "bucket": "retention-pks-demo1",
+    "key": "Actually/Letter/Report_Practice_4658HH.pdf",
+    "sequence_number": "80e8a6251de30278be6d6ef4e2248d8f420068a6251de30278be00000000000000000000000000000000000000000000000072",
+    "version_id": "SDxIf1IjKsP_EggfXq4njsME6k8CBJ8b",
+    "is_delete_marker": false,
+    "size": 2141,
+    "last_modified_date": "2025-08-20 19:42:22",
+    "e_tag": "82b680433a0c91afc7f2621eaf50033a",
+    "storage_class": "STANDARD",
+    "is_multipart": false,
+    "encryption_status": "SSE-S3",
+    "is_bucket_key_enabled": false,
+    "kms_key_arn": null,
+    "checksum_algorithm": "CRC32",
+    "object_tags": {},
+    "user_metadata": {
+      "owner": "Owner_3",
+      "description": "List whether establish down worker fly tonight. Customer third television offer poor. Wear body writer respond interview could. Only prevent upon. Teacher sit talk world hundred. Truth great might indeed break possible. Artist must final certain before visit. Quite particular consumer class road hair find. Financial course action her. Win character outside particular develop leave different. Together evidence smile trade over safe tree national. President political financial challenge term blue.",
+      "keyword": "Keyword_9,Keyword_10,Keyword_11,Keyword_7,Keyword_2,Keyword_12,Keyword_19",
+      "createddate": "2025-08-21 01:12:21"
+    }
+  }
+]
+```
+
+---
+
+### 3. Upload Script (Python + Boto3)
+
+```python
+import boto3
+import json
+
+s3 = boto3.client("s3")
+
+bucket_name = "your-bucket-name"
+key = "athena-data/records.json"
+
+with open("records.json", "rb") as f:
+    s3.upload_fileobj(f, bucket_name, key)
+
+print(f"✅ Uploaded records.json to s3://{bucket_name}/{key}")
+```
+
+---
+
+### 4. Query in Athena
+
+```sql
+SELECT id, bucket, key, size, user_metadata['owner'], user_metadata['keyword']
+FROM s3_metadata_objects;
+```
+
+---
