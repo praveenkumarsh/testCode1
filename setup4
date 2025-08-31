@@ -1,0 +1,88 @@
+import boto3
+import os
+
+# Initialize clients
+s3 = boto3.client("s3")
+s3tables = boto3.client("s3tables")
+sts = boto3.client("sts")
+
+ACCOUNT_ID = sts.get_caller_identity()["Account"]
+REGION = os.environ.get("AWS_REGION", "us-east-1")
+
+# Fully qualified names (replace 'your...' placeholders)
+DATA_BUCKET = "sandbox-my-metadata-demo-bucket-pk2"
+TABLE_BUCKET = "sandbox-my-metadata-demo-bucket-table-pk2"  # Bucket to store metadata table data
+NAMESPACE = "my_test_namespace2"  # lowercase, no hyphens or dots
+TABLE_NAME = "demo_metadata_table"
+
+def lambda_handler(event=None, context=None):
+    # 1. Create buckets if not existing8
+    try:
+        if REGION == "us-east-1":
+            s3.create_bucket(Bucket=DATA_BUCKET)
+            s3.create_bucket(Bucket=TABLE_BUCKET)
+        else:
+            config = {"Bucket": DATA_BUCKET, "CreateBucketConfiguration": {"LocationConstraint": REGION}}
+            s3.create_bucket(**config)
+            config["Bucket"] = TABLE_BUCKET
+            s3.create_bucket(**config)
+        print(f"✅ Buckets exist or created: {DATA_BUCKET}, {TABLE_BUCKET}")
+    except Exception as e:
+        print(f"Error creating buckets: {e}")
+        raise
+
+    # 2. Configure metadata table for the data bucket
+    try:
+        table_bucket_arn = f"arn:aws:s3tables:{REGION}:{ACCOUNT_ID}:bucket/{TABLE_BUCKET}"
+        resp = s3.create_bucket_metadata_table_configuration(
+            Bucket=DATA_BUCKET,
+            MetadataTableConfiguration={
+                "S3TablesDestination": {
+                    "TableBucketArn": table_bucket_arn,
+                    "TableName": TABLE_NAME
+                }
+            }
+        )
+        print("✅ Metadata table configuration created.")
+    except Exception as e:
+        print(f"Error creating metadata table configuration: {e}")
+        raise
+
+    # 3. Create namespace in TABLE_BUCKET
+    try:
+        resp = s3tables.create_namespace(
+            tableBucketARN=table_bucket_arn,
+            namespace=[NAMESPACE]
+        )
+        print(f"✅ Namespace '{NAMESPACE}' created in table bucket.")
+    except Exception as e:
+        print(f"Error creating namespace: {e}")
+        raise
+
+    # 4. Create the Iceberg metadata table
+    try:
+        resp = s3tables.create_table(
+            tableBucketARN=table_bucket_arn,
+            namespace=NAMESPACE,
+            name=TABLE_NAME,
+            format="ICEBERG",
+            metadata={
+                "iceberg": {
+                    "schema": {
+                        "fields": [
+                            {"name": "object_key", "type": "string", "required": True},
+                            {"name": "size", "type": "long", "required": False},
+                            {"name": "last_modified", "type": "timestamp", "required": False}
+                        ]
+                    }
+                }
+            }
+        )
+        print(f"Table '{TABLE_NAME}' created in namespace '{NAMESPACE}'.")
+        print("Table ARN:", resp.get("tableARN"))
+    except Exception as e:
+        print(f"Error creating table: {e}")
+        raise
+
+if __name__ == "__main__":
+    lambda_handler()
