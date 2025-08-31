@@ -1,0 +1,205 @@
+select * from inventory limit 10
+
+SELECT 
+    key,
+    user_metadata['description'] AS description,
+    user_metadata
+FROM inventory
+WHERE contains(split(user_metadata['keyword'], ','), 'Keyword_12');
+
+SELECT 
+    key,
+    user_metadata['description'] AS description,
+    user_metadata
+FROM inventory
+WHERE contains(split(user_metadata['description'], ','), 'A');
+
+SELECT 
+    key,
+    user_metadata['description'] AS description,
+    user_metadata
+FROM inventory
+WHERE user_metadata['description'] like '%a%';
+
+SELECT 
+    key,
+    user_metadata['description'] AS description,
+    user_metadata
+FROM inventory
+WHERE user_metadata['owner'] = 'Owner_7'
+
+SELECT 
+  regexp_extract(key, '[^/]+$') AS filename, -- extract only filename from key
+  size,
+  last_modified_date,
+  user_metadata['owner'] AS owner,
+  user_metadata['keyword'] AS keywords,
+  user_metadata['description'] AS description,
+  user_metadata['createddate'] AS created_date,
+  *
+FROM inventory
+WHERE bucket = 'retention-pks-demo1'
+  AND is_delete_marker = false
+  AND regexp_extract(key, '[^/]+$') LIKE 'Data%';
+
+===============================================================================================
+
+🔹 1. Using REGEXP_LIKE (cleanest way)
+SELECT *
+FROM my_table
+WHERE regexp_like(column_name, 'keyword1|keyword2|keyword3');
+
+
+This returns rows where column_name contains keyword1 OR keyword2 OR keyword3.
+
+Regex is case-sensitive by default. If you want case-insensitive:
+
+WHERE regexp_like(column_name, '(?i)keyword1|keyword2|keyword3');
+
+🔹 2. Using LIKE with OR
+SELECT *
+FROM my_table
+WHERE column_name LIKE '%keyword1%'
+   OR column_name LIKE '%keyword2%'
+   OR column_name LIKE '%keyword3%';
+
+
+✅ Works but gets messy if keywords list is long.
+
+🔹 3. Using REGEXP_LIKE with an array (dynamic keywords)
+
+If you have keywords in an array, you can check like this:
+
+SELECT *
+FROM my_table
+WHERE EXISTS (
+    SELECT 1
+    FROM UNNEST(ARRAY['keyword1','keyword2','keyword3']) t(k)
+    WHERE regexp_like(column_name, k)
+);
+
+
+This is super helpful if your keywords are dynamic or passed in from an app.
+
+👉 Example: Search for rows where message contains "error" OR "fail" OR "exception":
+
+SELECT *
+FROM logs
+WHERE regexp_like(message, '(?i)error|fail|exception');
+
+====================================================================================================
+
+🔹 1. With multiple LIKE
+SELECT *
+FROM my_table
+WHERE column_name LIKE '%keyword1%'
+  AND column_name LIKE '%keyword2%'
+  AND column_name LIKE '%keyword3%';
+
+🔹 2. With REGEXP_LIKE and lookahead (regex trick)
+
+If you have many keywords, regex lookahead works neatly:
+
+SELECT *
+FROM my_table
+WHERE regexp_like(column_name, '(?i)(?=.*keyword1)(?=.*keyword2)(?=.*keyword3)');
+
+
+Explanation:
+
+(?=.*keyword1) ensures keyword1 exists somewhere.
+
+(?=.*keyword2) ensures keyword2 exists.
+
+(?=.*keyword3) ensures keyword3 exists.
+
+(?i) makes it case-insensitive.
+
+This way you don’t have to chain a ton of LIKEs.
+
+🔹 3. With dynamic keyword array
+
+If you want to pass a list of keywords dynamically:
+
+SELECT *
+FROM my_table
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM UNNEST(ARRAY['keyword1','keyword2','keyword3']) t(k)
+    WHERE NOT regexp_like(column_name, k)
+);
+
+
+Explanation:
+
+UNNEST turns the array into rows (keyword1, keyword2, keyword3)
+
+If even one keyword is not found in column_name, it fails
+
+NOT EXISTS ensures all keywords matched.
+
+👉 Example: Get rows where description contains "java", "spring", and "backend":
+
+SELECT *
+FROM tech_jobs
+WHERE regexp_like(description, '(?i)(?=.*java)(?=.*spring)(?=.*backend)');
+
+=============================================================================================
+
+🔹 Example: Lambda in Python
+import boto3
+import os
+
+athena = boto3.client("athena")
+s3_output = os.environ.get("ATHENA_OUTPUT", "s3://my-athena-query-results/")  # query results bucket
+database = os.environ.get("ATHENA_DB", "my_database")
+
+def lambda_handler(event, context):
+    # Example: keywords passed in event
+    keywords = event.get("keywords", ["java", "spring", "backend"])
+
+    # ✅ Build regex dynamically for "contains all"
+    regex_parts = [f"(?=.*{kw})" for kw in keywords]
+    regex_pattern = "(?i)" + "".join(regex_parts)
+
+    query = f"""
+        SELECT *
+        FROM tech_jobs
+        WHERE regexp_like(description, '{regex_pattern}')
+    """
+
+    print("Generated Query:", query)
+
+    # Run Athena query
+    response = athena.start_query_execution(
+        QueryString=query,
+        QueryExecutionContext={"Database": database},
+        ResultConfiguration={"OutputLocation": s3_output}
+    )
+
+    return {
+        "QueryExecutionId": response["QueryExecutionId"],
+        "Query": query
+    }
+
+🔹 Example Input Event
+{
+  "keywords": ["python", "lambda", "serverless"]
+}
+
+
+This generates a query like:
+
+SELECT *
+FROM tech_jobs
+WHERE regexp_like(description, '(?i)(?=.*python)(?=.*lambda)(?=.*serverless)')
+
+🔹 Key Notes
+
+(?i) makes search case-insensitive.
+
+Each (?=.*kw) ensures the column contains that keyword somewhere.
+
+Results go to the S3 bucket defined in ATHENA_OUTPUT.
+
+You can fetch results later with get_query_results.
