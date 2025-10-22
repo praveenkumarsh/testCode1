@@ -1,0 +1,164 @@
+Perfect 👍 — since your **`keywords` column** is actually an **array of strings**, and you’ve added the **byte size as the last element**, we can easily adapt both queries.
+
+Let’s assume your data looks like this 👇
+
+| fileName | keywords                           |
+| -------- | ---------------------------------- |
+| a.pdf    | `['java', 'backend', '524288000']` |
+| b.pdf    | `['ai', 'ml', '1073741824']`       |
+| c.pdf    | `['spring', 'boot', '262144000']`  |
+
+Here, `keywords[-1]` (last element) = size in bytes (as string).
+
+---
+
+## ✅ Step 1: Extract last element from `keywords` array as `size_in_bytes`
+
+Athena (Presto/Trino) supports this pattern:
+
+```sql
+CAST(keywords[cardinality(keywords)] AS DOUBLE)
+```
+
+That returns the last element.
+
+---
+
+## ✅ Step 2: Final Queries (Updated for Your Case)
+
+---
+
+### 🔹 **Query 1 — Get total batch count (≈1 GB each)**
+
+```sql
+WITH docs AS (
+  SELECT 
+    fileName,
+    filePath,
+    link,
+    documentLink,
+    CAST(keywords[cardinality(keywords)] AS DOUBLE) AS size_in_bytes,
+    summary,
+    keywords
+  FROM documents
+),
+ranked AS (
+  SELECT
+    SUM(size_in_bytes) OVER (ORDER BY fileName ROWS UNBOUNDED PRECEDING) AS cumulative_size
+  FROM docs
+)
+SELECT 
+  MAX(CAST(cumulative_size / (1024 * 1024 * 1024) AS INT)) + 1 AS total_batches
+FROM ranked;
+```
+
+**✅ Output Example**
+
+```
+total_batches
+--------------
+3
+```
+
+---
+
+### 🔹 **Query 2 — Get records for a specific batch (pass :batch_number)**
+
+```sql
+WITH docs AS (
+  SELECT 
+    fileName,
+    filePath,
+    link,
+    documentLink,
+    CAST(keywords[cardinality(keywords)] AS DOUBLE) AS size_in_bytes,
+    summary,
+    keywords
+  FROM documents
+),
+ranked AS (
+  SELECT
+    *,
+    SUM(size_in_bytes) OVER (ORDER BY fileName ROWS UNBOUNDED PRECEDING) AS cumulative_size
+  FROM docs
+),
+batched AS (
+  SELECT
+    *,
+    CAST(cumulative_size / (1024 * 1024 * 1024) AS INT) AS batch_number
+  FROM ranked
+)
+SELECT 
+  fileName,
+  filePath,
+  link,
+  documentLink,
+  size_in_bytes,
+  summary,
+  keywords,
+  batch_number
+FROM batched
+WHERE batch_number = :batch_number;  -- e.g., 0, 1, 2, ...
+```
+
+---
+
+## ✅ Step 3: Combined Version (default batch = 1, includes total_batches)
+
+```sql
+WITH docs AS (
+  SELECT 
+    fileName,
+    filePath,
+    link,
+    documentLink,
+    CAST(keywords[cardinality(keywords)] AS DOUBLE) AS size_in_bytes,
+    summary,
+    keywords
+  FROM documents
+),
+ranked AS (
+  SELECT
+    *,
+    SUM(size_in_bytes) OVER (ORDER BY fileName ROWS UNBOUNDED PRECEDING) AS cumulative_size
+  FROM docs
+),
+batched AS (
+  SELECT
+    *,
+    CAST(cumulative_size / (1024 * 1024 * 1024) AS INT) AS batch_number
+  FROM ranked
+),
+final AS (
+  SELECT
+    b.*,
+    (SELECT MAX(batch_number) + 1 FROM batched) AS total_batches
+  FROM batched b
+)
+SELECT 
+  fileName,
+  filePath,
+  link,
+  documentLink,
+  size_in_bytes,
+  summary,
+  keywords,
+  batch_number,
+  total_batches
+FROM final
+WHERE batch_number = COALESCE(:batch_number, 1);  -- defaults to batch 1
+```
+
+---
+
+## ✅ Quick Recap
+
+| Goal                             | Query       | Notes                                    |
+| -------------------------------- | ----------- | ---------------------------------------- |
+| Get only total batch count       | **Query 1** | Simple aggregation                       |
+| Get specific batch               | **Query 2** | Use `:batch_number` param                |
+| Get batch + total count together | **Query 3** | Default `batch_number = 1`, can override |
+
+---
+
+Would you like me to add a **Java example (Athena JDBC/AWS SDK)** showing how to pass this `:batch_number` parameter dynamically and read the results batch-by-batch?
