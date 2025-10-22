@@ -1,0 +1,35 @@
+WITH file_data AS (
+    SELECT
+        console_path,
+        file_path,
+        file_name,
+        CAST(keywords[cardinality(keywords)] AS BIGINT) AS file_size_bytes,
+        ROW_NUMBER() OVER (ORDER BY CAST(keywords[cardinality(keywords)] AS BIGINT) DESC) AS row_num
+    FROM "data_retention_uat"."policy_document_metadata"
+    WHERE keywords IS NOT NULL
+      AND cardinality(keywords) > 0
+      AND TRY_CAST(keywords[cardinality(keywords)] AS BIGINT) IS NOT NULL
+      AND CAST(keywords[cardinality(keywords)] AS BIGINT) <= 1073741824  -- optional upper limit per file
+),
+safe_batching AS (
+    SELECT
+        *,
+        -- Conservative target: 1 GB per batch
+        CEIL(SUM(file_size_bytes) OVER (ORDER BY row_num) / 1073741824.0) AS batch_number
+    FROM file_data
+)
+SELECT
+    CAST(batch_number AS VARCHAR) AS batch_id,
+    COUNT(*) AS file_count,
+    ROUND(SUM(file_size_bytes) / (1024.0 * 1024.0 * 1024.0), 3) AS total_size_gb,
+    ROUND(SUM(file_size_bytes) / (1024.0 * 1024.0), 0) AS total_size_mb,
+    ROUND(100.0 * SUM(file_size_bytes) / (1024.0 * 1024.0 * 1024.0), 1) AS utilization_percent,
+    CASE
+        WHEN SUM(file_size_bytes) > 1073741824 THEN 'EXCEEDS_LIMIT'
+        WHEN SUM(file_size_bytes) < 104857600 THEN 'LOW_UTILIZATION'
+        ELSE 'COMPLIANT'
+    END AS batch_status,
+    ROUND(MAX(file_size_bytes) / (1024.0 * 1024.0), 1) AS largest_file_mb
+FROM safe_batching
+GROUP BY batch_number
+ORDER BY batch_number;
