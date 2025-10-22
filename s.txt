@@ -1,0 +1,165 @@
+Perfect 💪 — below are **the two final Athena SQL queries** that cleanly solve both use cases you described.
+They work assuming your table name is `documents` with a column `size` that stores values like `"500MB"`, `"2GB"`, `"800KB"`, etc.
+
+---
+
+## ✅ **Solution 1**
+
+### 🔹Query 1 — Get total batch count (in 1 GB chunks)
+
+```sql
+WITH docs AS (
+  SELECT 
+    CASE
+      WHEN size LIKE '%GB' THEN CAST(REPLACE(size, 'GB', '') AS DOUBLE) * 1024 * 1024 * 1024
+      WHEN size LIKE '%MB' THEN CAST(REPLACE(size, 'MB', '') AS DOUBLE) * 1024 * 1024
+      WHEN size LIKE '%KB' THEN CAST(REPLACE(size, 'KB', '') AS DOUBLE) * 1024
+      ELSE CAST(size AS DOUBLE)
+    END AS size_in_bytes
+  FROM documents
+),
+ranked AS (
+  SELECT
+    SUM(size_in_bytes) OVER (ORDER BY size_in_bytes ROWS UNBOUNDED PRECEDING) AS cumulative_size
+  FROM docs
+)
+SELECT 
+  MAX(CAST(cumulative_size / (1024 * 1024 * 1024) AS INT)) + 1 AS total_batches
+FROM ranked;
+```
+
+**➡ Output Example**
+
+```
+total_batches
+--------------
+5
+```
+
+---
+
+### 🔹Query 2 — Get records for a specific batch (pass :batch_number)
+
+```sql
+WITH docs AS (
+  SELECT 
+    fileName,
+    filePath,
+    link,
+    documentLink,
+    CASE
+      WHEN size LIKE '%GB' THEN CAST(REPLACE(size, 'GB', '') AS DOUBLE) * 1024 * 1024 * 1024
+      WHEN size LIKE '%MB' THEN CAST(REPLACE(size, 'MB', '') AS DOUBLE) * 1024 * 1024
+      WHEN size LIKE '%KB' THEN CAST(REPLACE(size, 'KB', '') AS DOUBLE) * 1024
+      ELSE CAST(size AS DOUBLE)
+    END AS size_in_bytes,
+    summary,
+    keywords
+  FROM documents
+),
+ranked AS (
+  SELECT
+    *,
+    SUM(size_in_bytes) OVER (ORDER BY fileName ROWS UNBOUNDED PRECEDING) AS cumulative_size
+  FROM docs
+),
+batched AS (
+  SELECT
+    *,
+    CAST(cumulative_size / (1024 * 1024 * 1024) AS INT) AS batch_number
+  FROM ranked
+)
+SELECT 
+  fileName,
+  filePath,
+  link,
+  documentLink,
+  size_in_bytes,
+  summary,
+  keywords,
+  batch_number
+FROM batched
+WHERE batch_number = :batch_number;  -- Replace :batch_number with 0, 1, 2, etc.
+```
+
+---
+
+## ✅ **Solution 2**
+
+### 🔹Single query: default `batch_number = 1`, also returns `total_batches` column
+
+You can **override** the batch dynamically by passing a parameter.
+
+```sql
+WITH docs AS (
+  SELECT 
+    fileName,
+    filePath,
+    link,
+    documentLink,
+    CASE
+      WHEN size LIKE '%GB' THEN CAST(REPLACE(size, 'GB', '') AS DOUBLE) * 1024 * 1024 * 1024
+      WHEN size LIKE '%MB' THEN CAST(REPLACE(size, 'MB', '') AS DOUBLE) * 1024 * 1024
+      WHEN size LIKE '%KB' THEN CAST(REPLACE(size, 'KB', '') AS DOUBLE) * 1024
+      ELSE CAST(size AS DOUBLE)
+    END AS size_in_bytes,
+    summary,
+    keywords
+  FROM documents
+),
+ranked AS (
+  SELECT
+    *,
+    SUM(size_in_bytes) OVER (ORDER BY fileName ROWS UNBOUNDED PRECEDING) AS cumulative_size
+  FROM docs
+),
+batched AS (
+  SELECT
+    *,
+    CAST(cumulative_size / (1024 * 1024 * 1024) AS INT) AS batch_number
+  FROM ranked
+),
+final AS (
+  SELECT
+    b.*,
+    (SELECT MAX(batch_number) + 1 FROM batched) AS total_batches
+  FROM batched b
+)
+SELECT 
+  fileName,
+  filePath,
+  link,
+  documentLink,
+  size_in_bytes,
+  summary,
+  keywords,
+  batch_number,
+  total_batches
+FROM final
+WHERE batch_number = COALESCE(:batch_number, 1);  -- defaults to batch 1 if not provided
+```
+
+---
+
+### 🧩 Example Outputs
+
+**If :batch_number = 1 (or not provided)**
+
+| fileName  | size_in_bytes | batch_number | total_batches |
+| --------- | ------------- | ------------ | ------------- |
+| fileA.pdf | 600000000     | 1            | 5             |
+| fileB.pdf | 400000000     | 1            | 5             |
+
+---
+
+### ✅ Summary Table
+
+| Goal                                     | Query to Use             | Returns                      |
+| ---------------------------------------- | ------------------------ | ---------------------------- |
+| Get total batch count only               | **Solution 1 → Query 1** | `total_batches`              |
+| Get data for a specific batch            | **Solution 1 → Query 2** | documents for `batch_number` |
+| Get batch data + total count in one call | **Solution 2**           | documents + `total_batches`  |
+
+---
+
+Would you like me to show the **Java Athena SDK (or JDBC)** code that runs these two queries dynamically (fetches total_batches first, then loops batch-by-batch)?
