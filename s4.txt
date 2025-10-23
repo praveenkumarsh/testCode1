@@ -1,11 +1,10 @@
-WITH RECURSIVE file_data AS (
-    -- Step 0: Extract file size and filter > 1 GB
+WITH file_data AS (
+    -- Extract file size and filter out >1 GB
     SELECT
         console_path,
         file_path,
         file_name,
-        CAST(keywords[cardinality(keywords)] AS BIGINT) AS file_size_bytes,
-        ROW_NUMBER() OVER (ORDER BY file_size_bytes DESC) AS rn
+        CAST(keywords[cardinality(keywords)] AS BIGINT) AS file_size_bytes
     FROM "data_retention_uat"."policy_document_metadata"
     WHERE keywords IS NOT NULL
       AND cardinality(keywords) > 0
@@ -13,42 +12,30 @@ WITH RECURSIVE file_data AS (
       AND CAST(keywords[cardinality(keywords)] AS BIGINT) <= 1073741824
 ),
 
--- Recursive CTE to assign batches
-batching AS (
-    -- Anchor: first file
+ordered_files AS (
+    -- Sort ascending so small files are packed first
     SELECT
-        rn,
-        file_name,
-        file_path,
-        console_path,
-        file_size_bytes,
-        1 AS batch_number,
-        file_size_bytes AS batch_sum
+        *,
+        ROW_NUMBER() OVER (ORDER BY file_size_bytes ASC) AS rn
     FROM file_data
-    WHERE rn = 1
+),
 
-    UNION ALL
-
-    -- Recursive step: assign next file to current batch if sum <= 1GB, else start new batch
+running_totals AS (
+    -- Cumulative sum of file sizes
     SELECT
-        f.rn,
-        f.file_name,
-        f.file_path,
-        f.console_path,
-        f.file_size_bytes,
-        CASE 
-            WHEN b.batch_sum + f.file_size_bytes <= 1073741824 THEN b.batch_number
-            ELSE b.batch_number + 1
-        END AS batch_number,
-        CASE 
-            WHEN b.batch_sum + f.file_size_bytes <= 1073741824 THEN b.batch_sum + f.file_size_bytes
-            ELSE f.file_size_bytes
-        END AS batch_sum
-    FROM batching b
-    JOIN file_data f ON f.rn = b.rn + 1
+        *,
+        SUM(file_size_bytes) OVER (ORDER BY rn ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total
+    FROM ordered_files
+),
+
+safe_batching AS (
+    -- Assign batch number based on running_total / 1GB
+    SELECT
+        *,
+        FLOOR((running_total - 1) / 1073741824) + 1 AS batch_number
+    FROM running_totals
 )
 
--- Final aggregation per batch
 SELECT
     batch_number AS batch_id,
     COUNT(*) AS file_count,
@@ -61,6 +48,6 @@ SELECT
         ELSE 'COMPLIANT'
     END AS batch_status,
     ROUND(MAX(file_size_bytes) / (1024*1024), 1) AS largest_file_mb
-FROM batching
+FROM safe_batching
 GROUP BY batch_number
 ORDER BY batch_number;
