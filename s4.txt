@@ -1,5 +1,4 @@
 WITH file_data AS (
-    -- Extract file size and filter out >1 GB
     SELECT
         console_path,
         file_path,
@@ -9,45 +8,53 @@ WITH file_data AS (
     WHERE keywords IS NOT NULL
       AND cardinality(keywords) > 0
       AND TRY_CAST(keywords[cardinality(keywords)] AS BIGINT) IS NOT NULL
-      AND CAST(keywords[cardinality(keywords)] AS BIGINT) <= 1073741824
 ),
 
-ordered_files AS (
-    -- Sort ascending so small files are packed first
-    SELECT
-        *,
-        ROW_NUMBER() OVER (ORDER BY file_size_bytes ASC) AS rn
+-- Step 1: Separate large files (>1GB) into their own batch
+large_files AS (
+    SELECT *, CAST(file_size_bytes / 1073741824 AS INT) + 1 AS batch_number
     FROM file_data
+    WHERE file_size_bytes > 1073741824
 ),
 
-running_totals AS (
-    -- Cumulative sum of file sizes
-    SELECT
-        *,
-        SUM(file_size_bytes) OVER (ORDER BY rn ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total
-    FROM ordered_files
+-- Step 2: Small files <=1GB
+small_files AS (
+    SELECT *
+    FROM file_data
+    WHERE file_size_bytes <= 1073741824
 ),
 
-safe_batching AS (
-    -- Assign batch number based on running_total / 1GB
-    SELECT
-        *,
-        FLOOR((running_total - 1) / 1073741824) + 1 AS batch_number
-    FROM running_totals
+-- Step 3: Order small files descending
+ordered_small_files AS (
+    SELECT *,
+           ROW_NUMBER() OVER (ORDER BY file_size_bytes DESC) AS rn
+    FROM small_files
+),
+
+-- Step 4: Compute cumulative sum and assign batch numbers
+safe_batches AS (
+    SELECT *,
+           FLOOR((SUM(file_size_bytes) OVER (ORDER BY rn ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) -1)/1073741824)+1 AS batch_number
+    FROM ordered_small_files
 )
 
+-- Step 5: Combine small and large files
 SELECT
-    batch_number AS batch_id,
+    batch_number,
     COUNT(*) AS file_count,
-    ROUND(SUM(file_size_bytes) / (1024*1024*1024), 3) AS total_size_gb,
-    ROUND(SUM(file_size_bytes) / (1024*1024), 0) AS total_size_mb,
-    ROUND(100.0 * SUM(file_size_bytes) / 1073741824, 1) AS utilization_percent,
+    ROUND(SUM(file_size_bytes)/(1024*1024*1024),3) AS total_size_gb,
+    ROUND(SUM(file_size_bytes)/(1024*1024),0) AS total_size_mb,
+    ROUND(100.0*SUM(file_size_bytes)/1073741824,1) AS utilization_percent,
     CASE
         WHEN SUM(file_size_bytes) > 1073741824 THEN 'EXCEEDS_LIMIT'
         WHEN SUM(file_size_bytes) < 104857600 THEN 'LOW_UTILIZATION'
         ELSE 'COMPLIANT'
     END AS batch_status,
-    ROUND(MAX(file_size_bytes) / (1024*1024), 1) AS largest_file_mb
-FROM safe_batching
+    ROUND(MAX(file_size_bytes)/(1024*1024),1) AS largest_file_mb
+FROM (
+    SELECT * FROM safe_batches
+    UNION ALL
+    SELECT * FROM large_files
+) t
 GROUP BY batch_number
 ORDER BY batch_number;
