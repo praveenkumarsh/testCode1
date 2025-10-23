@@ -1,63 +1,54 @@
-WITH RECURSIVE
-recursive_batches (
-    rn,
-    console_path,
-    file_path,
-    file_name,
-    file_size_bytes,
-    batch_number,
-    batch_running_total
-) AS (
-    -- Base case: first record
+WITH RECURSIVE file_data (console_path, file_path, file_name, file_size_bytes, rn) AS (
+    -- Step 1: Filter & order input data by file size (largest first)
     SELECT
-        1 AS rn,
         console_path,
         file_path,
         file_name,
         CAST(keywords[cardinality(keywords)] AS BIGINT) AS file_size_bytes,
-        1 AS batch_number,
-        CAST(keywords[cardinality(keywords)] AS BIGINT) AS batch_running_total
+        ROW_NUMBER() OVER (ORDER BY CAST(keywords[cardinality(keywords)] AS BIGINT) DESC) AS rn
     FROM "data_retention_uat"."policy_document_metadata"
     WHERE keywords IS NOT NULL
       AND cardinality(keywords) > 0
       AND TRY_CAST(keywords[cardinality(keywords)] AS BIGINT) IS NOT NULL
-      AND CAST(keywords[cardinality(keywords)] AS BIGINT) <= 1073741824
-    ORDER BY CAST(keywords[cardinality(keywords)] AS BIGINT) DESC
-    LIMIT 1
+      AND CAST(keywords[cardinality(keywords)] AS BIGINT) <= 1073741824  -- Ignore >1GB files
+),
+
+-- Step 2: Recursively assign batch numbers ensuring ≤1GB per batch
+recursive_batches (batch_number, rn, console_path, file_path, file_name, file_size_bytes, cumulative_size) AS (
+    -- Initial seed (first file)
+    SELECT
+        1 AS batch_number,
+        rn,
+        console_path,
+        file_path,
+        file_name,
+        file_size_bytes,
+        file_size_bytes AS cumulative_size
+    FROM file_data
+    WHERE rn = 1
 
     UNION ALL
 
-    -- Recursive case: add next file by order
+    -- Recursively add next file, checking batch total
     SELECT
-        f.rn,
-        f.console_path,
-        f.file_path,
-        f.file_name,
-        f.file_size_bytes,
         CASE
-            WHEN r.batch_running_total + f.file_size_bytes > 1073741824 THEN r.batch_number + 1
-            ELSE r.batch_number
+            WHEN rb.cumulative_size + fd.file_size_bytes > 1073741824 THEN rb.batch_number + 1
+            ELSE rb.batch_number
         END AS batch_number,
+        fd.rn,
+        fd.console_path,
+        fd.file_path,
+        fd.file_name,
+        fd.file_size_bytes,
         CASE
-            WHEN r.batch_running_total + f.file_size_bytes > 1073741824 THEN f.file_size_bytes
-            ELSE r.batch_running_total + f.file_size_bytes
-        END AS batch_running_total
-    FROM recursive_batches r
-    JOIN (
-        SELECT
-            ROW_NUMBER() OVER (ORDER BY CAST(keywords[cardinality(keywords)] AS BIGINT) DESC) AS rn,
-            console_path,
-            file_path,
-            file_name,
-            CAST(keywords[cardinality(keywords)] AS BIGINT) AS file_size_bytes
-        FROM "data_retention_uat"."policy_document_metadata"
-        WHERE keywords IS NOT NULL
-          AND cardinality(keywords) > 0
-          AND TRY_CAST(keywords[cardinality(keywords)] AS BIGINT) IS NOT NULL
-          AND CAST(keywords[cardinality(keywords)] AS BIGINT) <= 1073741824
-    ) f ON f.rn = r.rn + 1
+            WHEN rb.cumulative_size + fd.file_size_bytes > 1073741824 THEN fd.file_size_bytes
+            ELSE rb.cumulative_size + fd.file_size_bytes
+        END AS cumulative_size
+    FROM recursive_batches rb
+    JOIN file_data fd ON fd.rn = rb.rn + 1
 )
 
+-- Step 3: Summarize each batch
 SELECT
     batch_number AS batch_id,
     COUNT(*) AS file_count,
@@ -65,7 +56,7 @@ SELECT
     ROUND(SUM(file_size_bytes) / (1024.0 * 1024.0), 0) AS total_size_mb,
     ROUND(100.0 * SUM(file_size_bytes) / 1073741824, 1) AS utilization_percent,
     CASE
-        WHEN SUM(file_size_bytes) > 1073741824 THEN 'EXCEEDS_LIMIT'  -- should never happen
+        WHEN SUM(file_size_bytes) > 1073741824 THEN 'EXCEEDS_LIMIT'
         WHEN SUM(file_size_bytes) < 104857600 THEN 'LOW_UTILIZATION'
         ELSE 'COMPLIANT'
     END AS batch_status,
