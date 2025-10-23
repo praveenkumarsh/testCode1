@@ -1,0 +1,46 @@
+WITH file_data AS (
+    SELECT
+        console_path,
+        file_path,
+        file_name,
+        CAST(keywords[cardinality(keywords)] AS BIGINT) AS file_size_bytes
+    FROM "data_retention_uat"."policy_document_metadata"
+    WHERE keywords IS NOT NULL
+      AND cardinality(keywords) > 0
+      AND TRY_CAST(keywords[cardinality(keywords)] AS BIGINT) IS NOT NULL
+      AND CAST(keywords[cardinality(keywords)] AS BIGINT) <= 1073741824  -- Exclude files > 1 GB
+),
+
+-- Step 1: Order files by size (largest first) and compute running total
+running_totals AS (
+    SELECT
+        *,
+        SUM(file_size_bytes) OVER (ORDER BY file_size_bytes DESC
+                                   ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total
+    FROM file_data
+),
+
+-- Step 2: Assign batch numbers based on 1GB cumulative size boundary
+safe_batching AS (
+    SELECT
+        *,
+        CAST(FLOOR((running_total - 1) / 1073741824) + 1 AS INTEGER) AS batch_number
+    FROM running_totals
+)
+
+-- Step 3: Summarize per batch
+SELECT
+    batch_number AS batch_id,
+    COUNT(*) AS file_count,
+    ROUND(SUM(file_size_bytes) / (1024.0 * 1024.0 * 1024.0), 3) AS total_size_gb,
+    ROUND(SUM(file_size_bytes) / (1024.0 * 1024.0), 0) AS total_size_mb,
+    ROUND(100.0 * SUM(file_size_bytes) / 1073741824, 1) AS utilization_percent,
+    CASE
+        WHEN SUM(file_size_bytes) > 1073741824 THEN 'EXCEEDS_LIMIT'     -- Should never happen now
+        WHEN SUM(file_size_bytes) < 104857600 THEN 'LOW_UTILIZATION'    -- Less than 100 MB
+        ELSE 'COMPLIANT'
+    END AS batch_status,
+    ROUND(MAX(file_size_bytes) / (1024.0 * 1024.0), 1) AS largest_file_mb
+FROM safe_batching
+GROUP BY batch_number
+ORDER BY batch_number;
