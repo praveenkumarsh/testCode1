@@ -1,17 +1,4 @@
-WITH files AS (
-    SELECT
-        console_path,
-        file_path,
-        file_name,
-        CAST(keywords[cardinality(keywords)] AS BIGINT) AS file_size_bytes,
-        ROW_NUMBER() OVER (ORDER BY CAST(keywords[cardinality(keywords)] AS BIGINT) DESC) AS rn
-    FROM "data_retention_uat"."policy_document_metadata"
-    WHERE keywords IS NOT NULL
-      AND cardinality(keywords) > 0
-      AND TRY_CAST(keywords[cardinality(keywords)] AS BIGINT) IS NOT NULL
-      AND CAST(keywords[cardinality(keywords)] AS BIGINT) <= 1073741824
-),
-
+WITH RECURSIVE
 recursive_batches (
     rn,
     console_path,
@@ -21,21 +8,26 @@ recursive_batches (
     batch_number,
     batch_running_total
 ) AS (
-    -- base member: first row (rn = 1)
+    -- Base case: first record
     SELECT
-        f.rn,
-        f.console_path,
-        f.file_path,
-        f.file_name,
-        f.file_size_bytes,
+        1 AS rn,
+        console_path,
+        file_path,
+        file_name,
+        CAST(keywords[cardinality(keywords)] AS BIGINT) AS file_size_bytes,
         1 AS batch_number,
-        f.file_size_bytes AS batch_running_total
-    FROM files f
-    WHERE f.rn = 1
+        CAST(keywords[cardinality(keywords)] AS BIGINT) AS batch_running_total
+    FROM "data_retention_uat"."policy_document_metadata"
+    WHERE keywords IS NOT NULL
+      AND cardinality(keywords) > 0
+      AND TRY_CAST(keywords[cardinality(keywords)] AS BIGINT) IS NOT NULL
+      AND CAST(keywords[cardinality(keywords)] AS BIGINT) <= 1073741824
+    ORDER BY CAST(keywords[cardinality(keywords)] AS BIGINT) DESC
+    LIMIT 1
 
     UNION ALL
 
-    -- recursive member: pick the next rn and update batch counters
+    -- Recursive case: add next file by order
     SELECT
         f.rn,
         f.console_path,
@@ -51,7 +43,19 @@ recursive_batches (
             ELSE r.batch_running_total + f.file_size_bytes
         END AS batch_running_total
     FROM recursive_batches r
-    JOIN files f ON f.rn = r.rn + 1
+    JOIN (
+        SELECT
+            ROW_NUMBER() OVER (ORDER BY CAST(keywords[cardinality(keywords)] AS BIGINT) DESC) AS rn,
+            console_path,
+            file_path,
+            file_name,
+            CAST(keywords[cardinality(keywords)] AS BIGINT) AS file_size_bytes
+        FROM "data_retention_uat"."policy_document_metadata"
+        WHERE keywords IS NOT NULL
+          AND cardinality(keywords) > 0
+          AND TRY_CAST(keywords[cardinality(keywords)] AS BIGINT) IS NOT NULL
+          AND CAST(keywords[cardinality(keywords)] AS BIGINT) <= 1073741824
+    ) f ON f.rn = r.rn + 1
 )
 
 SELECT
@@ -61,7 +65,7 @@ SELECT
     ROUND(SUM(file_size_bytes) / (1024.0 * 1024.0), 0) AS total_size_mb,
     ROUND(100.0 * SUM(file_size_bytes) / 1073741824, 1) AS utilization_percent,
     CASE
-        WHEN SUM(file_size_bytes) > 1073741824 THEN 'EXCEEDS_LIMIT'  -- should not occur
+        WHEN SUM(file_size_bytes) > 1073741824 THEN 'EXCEEDS_LIMIT'  -- should never happen
         WHEN SUM(file_size_bytes) < 104857600 THEN 'LOW_UTILIZATION'
         ELSE 'COMPLIANT'
     END AS batch_status,
