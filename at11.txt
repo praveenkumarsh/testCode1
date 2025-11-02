@@ -1,0 +1,32 @@
+
+-- ✅ FINAL OUTPUT
+SELECT *
+FROM (
+    -- 🟢 Option 1: Show batch summary
+    SELECT 
+        'SUMMARY' AS result_type,
+        bs.batch_number,
+        bs.file_count,
+        bs.total_size_gb,
+        bs.largest_file_mb
+    FROM batch_summary bs
+    CROSS JOIN params p
+    WHERE p.target_batch_number IS NULL
+
+    UNION ALL
+
+    -- 🟢 Option 2: Show files of a specific batch
+    SELECT 
+        'DETAIL' AS result_type,
+        b.batch_number,
+        b.document_name,
+        b.document_path,
+        ROUND(b.file_size_mb, 2) AS file_size_mb,
+        NULL AS total_size_gb,
+        NULL AS largest_file_mb
+    FROM batches b
+    CROSS JOIN params p
+    WHERE p.target_batch_number IS NOT NULL
+      AND b.batch_number = p.target_batch_number
+)
+ORDER BY batch_number;
