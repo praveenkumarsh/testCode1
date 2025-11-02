@@ -1,0 +1,26 @@
+
+SELECT
+    CASE 
+        WHEN p.target_batch_number IS NULL THEN 'SUMMARY'
+        ELSE 'DETAIL'
+    END AS result_type,
+
+    b.batch_number,
+    
+    -- 📊 If summary mode
+    CASE WHEN p.target_batch_number IS NULL THEN CAST(bs.file_count AS VARCHAR) END AS file_count,
+    CASE WHEN p.target_batch_number IS NULL THEN CAST(bs.total_size_gb AS VARCHAR) END AS total_size_gb,
+    CASE WHEN p.target_batch_number IS NULL THEN CAST(bs.largest_file_mb AS VARCHAR) END AS largest_file_mb,
+
+    -- 📂 If detail mode
+    CASE WHEN p.target_batch_number IS NOT NULL THEN b.document_name END AS document_name,
+    CASE WHEN p.target_batch_number IS NOT NULL THEN b.document_path END AS document_path,
+    CASE WHEN p.target_batch_number IS NOT NULL THEN CAST(ROUND(b.file_size_mb, 2) AS VARCHAR) END AS file_size_mb
+
+FROM batches b
+LEFT JOIN batch_summary bs ON b.batch_number = bs.batch_number
+CROSS JOIN params p
+WHERE 
+    -- 🧠 Filter dynamically
+    (p.target_batch_number IS NULL OR b.batch_number = p.target_batch_number)
+ORDER BY b.batch_number;
