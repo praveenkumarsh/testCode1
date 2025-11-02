@@ -1,0 +1,86 @@
+WITH params AS (
+    SELECT
+        800 AS batch_size_mb,          -- ✅ Dynamic batch size (change here or pass programmatically)
+        NULL AS target_batch_number    -- ✅ Pass a specific batch number to filter (NULL = show all)
+),
+
+file_data AS (
+    SELECT
+        document_link,
+        document_path,
+        document_name,
+        CAST(keywords[cardinality(keywords)] AS BIGINT) AS file_size_bytes
+    FROM "data_retention_uat"."document_metadata"
+    WHERE keywords IS NOT NULL
+      AND cardinality(keywords) > 0
+      AND TRY_CAST(keywords[cardinality(keywords)] AS BIGINT) IS NOT NULL
+      AND CAST(keywords[cardinality(keywords)] AS BIGINT) <= 1073741824  -- Exclude >1GB files
+),
+
+ordered AS (
+    SELECT
+        f.*,
+        CAST(file_size_bytes / 1048576.0 AS DOUBLE) AS file_size_mb,
+        SUM(file_size_bytes / 1048576.0) OVER (
+            ORDER BY file_size_bytes DESC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS cumulative_mb
+    FROM file_data f
+),
+
+batches AS (
+    SELECT
+        o.*,
+        CASE
+            WHEN o.file_size_mb > p.batch_size_mb THEN ROW_NUMBER() OVER () + 100000
+            ELSE CAST(CEIL(GREATEST(o.cumulative_mb, 0) / p.batch_size_mb) AS BIGINT)
+        END AS batch_number
+    FROM ordered o
+    CROSS JOIN params p
+),
+
+batch_summary AS (
+    SELECT
+        batch_number,
+        COUNT(*) AS file_count,
+        ROUND(SUM(file_size_bytes) / POWER(1024, 3), 3) AS total_size_gb,
+        ROUND(MAX(file_size_bytes) / POWER(1024, 2), 2) AS largest_file_mb
+    FROM batches
+    GROUP BY batch_number
+)
+
+-- ✅ FINAL OUTPUT: Dynamic selection based on target_batch_number
+SELECT 
+    CASE 
+        WHEN p.target_batch_number IS NULL THEN 'BATCH_SUMMARY'
+        ELSE 'BATCH_DETAILS'
+    END AS result_type,
+    *
+FROM (
+    -- 🟢 If target_batch_number is NULL → show batch summary
+    SELECT 
+        b.batch_number,
+        bs.file_count,
+        bs.total_size_gb,
+        bs.largest_file_mb
+    FROM batches b
+    JOIN batch_summary bs USING (batch_number)
+    CROSS JOIN params p
+    WHERE p.target_batch_number IS NULL
+
+    UNION ALL
+
+    -- 🟢 If target_batch_number is set → show only that batch’s file list
+    SELECT 
+        b.batch_number,
+        b.document_name,
+        b.document_path,
+        ROUND(b.file_size_mb, 2) AS file_size_mb
+    FROM batches b
+    CROSS JOIN params p
+    WHERE p.target_batch_number IS NOT NULL
+      AND b.batch_number = p.target_batch_number
+) t
+CROSS JOIN params p
+ORDER BY batch_number;
+A
