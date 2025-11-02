@@ -1,0 +1,38 @@
+WITH file_data AS (
+  SELECT
+    document_link,
+    document_path,
+    document_name,
+    CAST(keywords[cardinality(keywords)] AS BIGINT) AS file_size_bytes
+  FROM "data_retention_uat"."document_metadata"
+  WHERE keywords IS NOT NULL
+    AND cardinality(keywords) > 0
+    AND TRY_CAST(keywords[cardinality(keywords)] AS BIGINT) IS NOT NULL
+    AND CAST(keywords[cardinality(keywords)] AS BIGINT) <= 1073741824
+),
+
+ordered AS (
+  SELECT
+    document_link,
+    document_path,
+    document_name,
+    file_size_bytes,
+    SUM(file_size_bytes) OVER (ORDER BY file_size_bytes DESC) AS cumulative_bytes
+  FROM file_data
+),
+
+batches AS (
+  SELECT
+    *,
+    CAST(FLOOR((cumulative_bytes - 1) / 1073741824) + 1 AS INTEGER) AS batch_number
+  FROM ordered
+)
+
+SELECT
+  batch_number,
+  COUNT(*) AS file_count,
+  ROUND(SUM(file_size_bytes) / (1024.0 * 1024.0 * 1024.0), 3) AS total_size_gb,
+  ROUND(MAX(file_size_bytes) / (1024.0 * 1024.0), 1) AS largest_file_mb
+FROM batches
+GROUP BY batch_number
+ORDER BY batch_number;
