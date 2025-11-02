@@ -1,0 +1,54 @@
+WITH file_data AS (
+    SELECT
+        document_link,
+        document_path,
+        document_name,
+        -- Extract file size (in bytes) from your keywords JSON/array column
+        CAST(element_at(keywords, cardinality(keywords)) AS BIGINT) AS file_size_bytes
+    FROM data_retention_uat.document_metadata
+    WHERE 
+        -- 👇 Apply your WHERE condition here
+        -- Example:
+        document_type = 'PDF'
+        AND element_at(keywords, cardinality(keywords)) IS NOT NULL
+),
+
+ordered AS (
+    SELECT
+        document_link,
+        document_path,
+        document_name,
+        file_size_bytes,
+        CAST(file_size_bytes / 1048576.0 AS DOUBLE) AS file_size_mb,
+        SUM(file_size_bytes / 1048576.0) 
+            OVER (ORDER BY file_size_bytes ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+            AS cumulative_mb
+    FROM file_data
+),
+
+batches AS (
+    SELECT
+        document_link,
+        document_path,
+        document_name,
+        file_size_bytes,
+        file_size_mb,
+        cumulative_mb,
+        
+        CASE 
+            -- 🧱 Large individual file: give it a unique batch number (so it doesn’t exceed limit)
+            WHEN file_size_mb > 950 THEN ROW_NUMBER() OVER () + 100000
+            -- 🔢 Otherwise, batch in 950 MB chunks
+            ELSE CAST(FLOOR((cumulative_mb - 1) / 950) AS BIGINT)
+        END AS batch_number
+    FROM ordered
+)
+
+SELECT
+    batch_number,
+    COUNT(*) AS file_count,
+    ROUND(SUM(file_size_bytes) / POWER(1024, 3), 3) AS total_size_gb,
+    ROUND(MAX(file_size_bytes) / POWER(1024, 2), 2) AS largest_file_mb
+FROM batches
+GROUP BY batch_number
+ORDER BY batch_number;
