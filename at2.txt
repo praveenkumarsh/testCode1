@@ -1,0 +1,66 @@
+WITH RECURSIVE file_data AS (
+  SELECT
+    document_link,
+    document_path,
+    document_name,
+    CAST(keywords[cardinality(keywords)] AS BIGINT) AS file_size_bytes
+  FROM "data_retention_uat"."document_metadata"
+  WHERE keywords IS NOT NULL
+    AND cardinality(keywords) > 0
+    AND TRY_CAST(keywords[cardinality(keywords)] AS BIGINT) IS NOT NULL
+    AND CAST(keywords[cardinality(keywords)] AS BIGINT) <= 1073741824  -- ≤ 1 GB
+),
+
+ordered_files AS (
+  SELECT
+    document_link,
+    document_path,
+    document_name,
+    file_size_bytes,
+    ROW_NUMBER() OVER (ORDER BY file_size_bytes DESC) AS rn
+  FROM file_data
+),
+
+recursive_batches AS (
+  -- base case
+  SELECT
+    rn,
+    document_link,
+    document_path,
+    document_name,
+    file_size_bytes,
+    1 AS batch_number,
+    file_size_bytes AS running_total
+  FROM ordered_files
+  WHERE rn = 1
+
+  UNION ALL
+
+  -- recursive case
+  SELECT
+    f.rn,
+    f.document_link,
+    f.document_path,
+    f.document_name,
+    f.file_size_bytes,
+    CASE
+      WHEN r.running_total + f.file_size_bytes > 1073741824 THEN r.batch_number + 1
+      ELSE r.batch_number
+    END AS batch_number,
+    CASE
+      WHEN r.running_total + f.file_size_bytes > 1073741824 THEN f.file_size_bytes
+      ELSE r.running_total + f.file_size_bytes
+    END AS running_total
+  FROM recursive_batches r
+  JOIN ordered_files f
+    ON f.rn = r.rn + 1
+)
+
+SELECT
+  batch_number,
+  COUNT(*) AS file_count,
+  ROUND(SUM(file_size_bytes) / (1024.0 * 1024.0 * 1024.0), 3) AS total_size_gb,
+  ROUND(MAX(file_size_bytes) / (1024.0 * 1024.0), 1) AS largest_file_mb
+FROM recursive_batches
+GROUP BY batch_number
+ORDER BY batch_number;
