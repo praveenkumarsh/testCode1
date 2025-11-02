@@ -1,0 +1,51 @@
+WITH file_data AS (
+    SELECT
+        document_link,
+        document_path,
+        document_name,
+        CAST(keywords[cardinality(keywords)] AS BIGINT) AS file_size_bytes
+    FROM "data_retention_uat"."document_metadata"
+    WHERE keywords IS NOT NULL
+      AND cardinality(keywords) > 0
+      AND TRY_CAST(keywords[cardinality(keywords)] AS BIGINT) IS NOT NULL
+      AND CAST(keywords[cardinality(keywords)] AS BIGINT) <= 1073741824  -- Exclude >1GB files
+),
+
+ordered AS (
+    SELECT
+        document_link,
+        document_path,
+        document_name,
+        file_size_bytes,
+        CAST(file_size_bytes / 1048576.0 AS DOUBLE) AS file_size_mb,
+        SUM(file_size_bytes / 1048576.0) OVER (
+            ORDER BY file_size_bytes ASC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS cumulative_mb
+    FROM file_data
+),
+
+batches AS (
+    SELECT
+        document_link,
+        document_path,
+        document_name,
+        file_size_bytes,
+        file_size_mb,
+        cumulative_mb,
+        CASE 
+            WHEN file_size_mb > 950 THEN ROW_NUMBER() OVER () + 100000
+            ELSE CAST(FLOOR(GREATEST(cumulative_mb - 1, 0) / 950) AS BIGINT)
+        END AS batch_number
+    FROM ordered
+)
+
+-- 🎯 Fetch all files from a particular batch
+SELECT
+    document_link,
+    document_path,
+    document_name,
+    ROUND(file_size_bytes / POWER(1024, 2), 2) AS file_size_mb
+FROM batches
+WHERE batch_number = :batch_number  -- e.g., 5
+ORDER BY file_size_bytes DESC;
