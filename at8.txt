@@ -1,0 +1,59 @@
+WITH file_data AS (
+    SELECT
+        console_path,
+        file_path,
+        file_name,
+        CAST(keywords[cardinality(keywords)] AS BIGINT) AS file_size_bytes,
+        ROW_NUMBER() OVER (ORDER BY CAST(keywords[cardinality(keywords)] AS BIGINT) DESC) AS row_num
+    FROM "data_retention_uat"."policy_document_metadata"
+    WHERE keywords IS NOT NULL
+      AND cardinality(keywords) > 0
+      AND TRY_CAST(keywords[cardinality(keywords)] AS BIGINT) IS NOT NULL
+      AND CAST(keywords[cardinality(keywords)] AS BIGINT) <= 1073741824   -- Skip >1GB files
+),
+
+safe_batches AS (
+    SELECT
+        *,
+        -- Conservative chunk size: 900 MB to guarantee no overflow near 1GB
+        CEIL(SUM(file_size_bytes) OVER (ORDER BY row_num) / 900000000.0) AS batch_number
+    FROM file_data
+)
+
+SELECT
+    CAST(batch_number AS VARCHAR) AS batch_id,
+    COUNT(*) AS file_count,
+    ROUND(SUM(file_size_bytes) / POWER(1024, 3), 3) AS total_size_gb,
+    ROUND(SUM(file_size_bytes) / POWER(1024, 2), 2) AS total_size_mb,
+    ROUND(100.0 * SUM(file_size_bytes) / 1073741824.0, 1) AS utilization_percent,
+    CASE
+        WHEN SUM(file_size_bytes) > 1073741824 THEN 'EXCEEDS_LIMIT'
+        WHEN SUM(file_size_bytes) < 0.85 * 1073741824 THEN 'LOW_UTILIZATION'
+        ELSE 'OPTIMAL'
+    END AS batch_status,
+    ROUND(MAX(file_size_bytes) / POWER(1024, 2), 2) AS largest_file_mb
+FROM safe_batches
+GROUP BY batch_number
+ORDER BY batch_number;
+
+
+-------
+
+WITH file_data AS (
+    SELECT
+        console_path,
+        file_path,
+        file_name,
+        CAST(keywords[cardinality(keywords)] AS BIGINT) AS file_size_bytes,
+        ROW_NUMBER() OVER (ORDER BY CAST(keywords[cardinality(keywords)] AS BIGINT) DESC) AS row_num
+    FROM "data_retention_uat"."policy_document_metadata"
+),
+safe_batches AS (
+    SELECT
+        *,
+        CEIL(SUM(file_size_bytes) OVER (ORDER BY row_num) / 900000000.0) AS batch_number
+    FROM file_data
+)
+SELECT *
+FROM safe_batches
+WHERE batch_number = <your_batch_number>;
