@@ -1,0 +1,28 @@
+-- ===========================================
+-- Step 6A: Case 1 - Summary mode
+-- ===========================================
+SELECT 
+    s.batch_number,
+    s.file_count,
+    s.total_size_gb,
+    s.largest_file_mb
+FROM batch_summary s
+CROSS JOIN params p
+WHERE p.mode = 'summary'
+ORDER BY s.batch_number;
+
+-- ===========================================
+-- Step 6B: Case 2 - Details mode (for given batch)
+-- ===========================================
+SELECT 
+    b.batch_number,
+    b.document_name,
+    b.document_path,
+    ROUND(b.file_size_mb, 2) AS file_size_mb
+FROM batches b
+CROSS JOIN params p
+WHERE 
+    p.mode = 'details'
+    AND p.target_batch_number IS NOT NULL
+    AND b.batch_number = p.target_batch_number
+ORDER BY b.file_size_mb DESC;
