@@ -1,0 +1,284 @@
+"""
+FINAL – Lightweight GenAI-optimized file converter
+
+Supported:
+- DOCX -> PDF (text, images, tables, charts as TEXT)
+- PPTX -> PDF (text, images, charts as TEXT)
+- ANY  -> TXT (auto based on src extension)
+
+Charts:
+- DOCX charts parsed via relationship chart parts (FIXED)
+- PPTX charts via python-pptx
+
+Safe for AWS Lambda
+"""
+
+import os
+import io
+import json
+import csv
+import xml.etree.ElementTree as ET
+from lxml import etree
+
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
+
+from docx import Document
+from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+
+# ==================================================
+# PUBLIC ENTRY
+# ==================================================
+def convert_file(input_path, output_path, src_ext, dst_ext):
+    src_ext = src_ext.lower()
+    dst_ext = dst_ext.lower()
+
+    _validate_file(input_path)
+
+    if dst_ext == "pdf":
+        if src_ext == "docx":
+            _docx_to_pdf(input_path, output_path)
+            return
+        if src_ext == "pptx":
+            _pptx_to_pdf(input_path, output_path)
+            return
+        raise ValueError(f"PDF not supported for {src_ext}")
+
+    if dst_ext == "txt":
+        _auto_to_txt(input_path, output_path, src_ext)
+        return
+
+    raise ValueError(f"Unsupported conversion {src_ext} → {dst_ext}")
+
+
+# ==================================================
+# VALIDATION
+# ==================================================
+def _validate_file(path):
+    if not os.path.exists(path):
+        raise FileNotFoundError("Input file not found")
+    if os.path.getsize(path) > 50 * 1024 * 1024:
+        raise ValueError("File too large for Lambda")
+
+
+# ==================================================
+# DOCX → PDF
+# ==================================================
+def _docx_to_pdf(docx_path, pdf_path):
+    doc = Document(docx_path)
+    c = canvas.Canvas(pdf_path, pagesize=A4)
+    y = 800
+
+    # TEXT
+    for p in doc.paragraphs:
+        if p.text.strip():
+            y = _draw_wrapped(c, p.text, y)
+
+    # TABLES
+    for table in doc.tables:
+        y = _heading(c, "[TABLE]", y)
+        for row in table.rows:
+            y = _draw_wrapped(c, " | ".join(cell.text for cell in row.cells), y)
+
+    # IMAGES
+    for rel in doc.part.rels.values():
+        if "image" in rel.target_ref:
+            y = _ensure_space(c, y, 180)
+            img = ImageReader(io.BytesIO(rel.target_part.blob))
+            c.drawImage(img, 40, y - 150, width=200, height=150, preserveAspectRatio=True)
+            y -= 170
+
+    # CHARTS (FIXED)
+    for chart in _extract_docx_charts(doc):
+        y = _write_chart_text(c, chart, y)
+
+    c.save()
+
+
+# ==================================================
+# PPTX → PDF
+# ==================================================
+def _pptx_to_pdf(pptx_path, pdf_path):
+    prs = Presentation(pptx_path)
+    c = canvas.Canvas(pdf_path, pagesize=A4)
+
+    for i, slide in enumerate(prs.slides, 1):
+        y = 800
+        c.drawString(40, y, f"[SLIDE {i}]")
+        y -= 20
+
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                for p in shape.text_frame.paragraphs:
+                    if p.text.strip():
+                        y = _draw_wrapped(c, p.text, y)
+
+            if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                y = _ensure_space(c, y, 200)
+                img = ImageReader(io.BytesIO(shape.image.blob))
+                c.drawImage(img, 40, y - 180, width=200, height=180, preserveAspectRatio=True)
+                y -= 200
+
+            if shape.has_chart:
+                y = _write_chart_text(c, _extract_pptx_chart(shape), y)
+
+        c.showPage()
+
+    c.save()
+
+
+# ==================================================
+# AUTO TXT
+# ==================================================
+def _auto_to_txt(input_path, output_path, src_ext):
+    if src_ext in {"csv", "json", "xml"}:
+        _simple_to_txt(input_path, output_path, src_ext)
+    elif src_ext == "docx":
+        _docx_to_txt(input_path, output_path)
+    elif src_ext == "pptx":
+        _pptx_to_txt(input_path, output_path)
+    else:
+        raise ValueError(f"TXT not supported for {src_ext}")
+
+
+# ==================================================
+# TXT HELPERS
+# ==================================================
+def _simple_to_txt(input_path, output_path, src_ext):
+    with open(output_path, "w", encoding="utf-8") as out:
+        if src_ext == "csv":
+            with open(input_path) as f:
+                for row in csv.reader(f):
+                    out.write("\t".join(row) + "\n")
+        elif src_ext == "json":
+            with open(input_path) as f:
+                out.write(json.dumps(json.load(f), indent=2))
+        elif src_ext == "xml":
+            tree = ET.parse(input_path)
+            out.write(ET.tostring(tree.getroot(), encoding="unicode"))
+
+
+def _docx_to_txt(docx_path, txt_path):
+    doc = Document(docx_path)
+    with open(txt_path, "w", encoding="utf-8") as out:
+        for p in doc.paragraphs:
+            if p.text.strip():
+                out.write(p.text + "\n")
+
+        for chart in _extract_docx_charts(doc):
+            _write_chart_txt(out, chart)
+
+
+def _pptx_to_txt(pptx_path, txt_path):
+    prs = Presentation(pptx_path)
+    with open(txt_path, "w", encoding="utf-8") as out:
+        for i, slide in enumerate(prs.slides, 1):
+            out.write(f"\n[SLIDE {i}]\n")
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for p in shape.text_frame.paragraphs:
+                        out.write(p.text + "\n")
+                if shape.has_chart:
+                    _write_chart_txt(out, _extract_pptx_chart(shape))
+
+
+# ==================================================
+# CHART EXTRACTION (DOCX – FIXED)
+# ==================================================
+def _extract_docx_charts(doc):
+    charts = []
+
+    for rel in doc.part.rels.values():
+        if "chart" not in rel.reltype:
+            continue
+
+        xml = etree.fromstring(rel.target_part.blob)
+        ns = {
+            "c": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+            "a": "http://schemas.openxmlformats.org/drawingml/2006/main"
+        }
+
+        chart = {"title": "Unknown", "categories": [], "series": []}
+
+        title = xml.find(".//c:title//a:t", ns)
+        if title is not None:
+            chart["title"] = title.text
+
+        for ser in xml.findall(".//c:ser", ns):
+            name = ser.find(".//a:t", ns)
+            values = [v.text for v in ser.findall(".//c:val//c:v", ns)]
+            chart["series"].append({
+                "name": name.text if name is not None else "Series",
+                "values": values
+            })
+
+        charts.append(chart)
+
+    return charts
+
+
+def _extract_pptx_chart(shape):
+    chart = shape.chart
+    return {
+        "title": chart.chart_title.text_frame.text if chart.has_title else "Unknown",
+        "series": [{"name": s.name, "values": [str(v) for v in s.values]} for s in chart.series]
+    }
+
+
+# ==================================================
+# OUTPUT HELPERS
+# ==================================================
+def _write_chart_text(c, chart, y):
+    y = _heading(c, "[CHART]", y)
+    y = _draw_wrapped(c, f"Title: {chart['title']}", y)
+    for s in chart["series"]:
+        y = _draw_wrapped(c, f"{s['name']}: {', '.join(s['values'])}", y)
+    return y
+
+
+def _write_chart_txt(out, chart):
+    out.write("\n[CHART]\n")
+    out.write(f"Title: {chart['title']}\n")
+    for s in chart["series"]:
+        out.write(f"{s['name']}: {', '.join(s['values'])}\n")
+
+
+def _draw_wrapped(c, text, y):
+    for line in _wrap(text):
+        if y < 50:
+            c.showPage()
+            y = 800
+        c.drawString(40, y, line)
+        y -= 14
+    return y
+
+
+def _wrap(text, n=90):
+    words, line, out = text.split(), "", []
+    for w in words:
+        if len(line) + len(w) > n:
+            out.append(line)
+            line = w + " "
+        else:
+            line += w + " "
+    out.append(line)
+    return out
+
+
+def _heading(c, text, y):
+    if y < 60:
+        c.showPage()
+        y = 800
+    c.drawString(40, y, text)
+    return y - 18
+
+
+def _ensure_space(c, y, need):
+    return 800 if y < need else y
+
+
+# convert_file("file-sample_1MB.docx", "output1.pdf", "docx", "pdf")
+# convert_file("file_example_PPT_1MB.ppt", "output2.pdf", "pptx", "pdf")
