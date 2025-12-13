@@ -1,19 +1,58 @@
-from xhtml2pdf import pisa
 from bs4 import BeautifulSoup
+from xhtml2pdf import pisa
+
+REMOVE_TAGS = {
+    "style", "script", "link", "meta", "iframe", "object"
+}
+
+REMOVE_ATTR_PREFIXES = (
+    "ng-", "data-ng", "x-ng", "xmlns", "mso:"
+)
+
+REMOVE_ATTRS = {
+    "class", "style", "onclick", "onload"
+}
+
+def sanitize_html_for_xhtml2pdf(html_text):
+    soup = BeautifulSoup(html_text, "html.parser")
+
+    # Remove unsupported tags
+    for tag in soup.find_all(REMOVE_TAGS):
+        tag.decompose()
+
+    # Remove comments & doctype
+    for item in soup.contents:
+        if item.name is None:
+            item.extract()
+
+    # Clean attributes
+    for tag in soup.find_all(True):
+        attrs = dict(tag.attrs)
+        for attr in attrs:
+            if (
+                attr in REMOVE_ATTRS
+                or attr.startswith(REMOVE_ATTR_PREFIXES)
+            ):
+                del tag.attrs[attr]
+
+    body = soup.body.decode_contents() if soup.body else soup.decode_contents()
+
+    # Minimal XHTML wrapper
+    return f"""
+    <html>
+      <body>
+        {body}
+      </body>
+    </html>
+    """
 
 def html_to_pdf(html_path, pdf_path):
     with open(html_path, "r", encoding="utf-8", errors="ignore") as f:
-        soup = BeautifulSoup(f.read(), "html.parser")
+        html = f.read()
 
-    # Remove all CSS
-    for tag in soup.find_all(["style", "link"]):
-        tag.decompose()
+    clean_html = sanitize_html_for_xhtml2pdf(html)
 
     with open(pdf_path, "wb") as pdf:
-        pisa.CreatePDF(str(soup), dest=pdf)
+        pisa.CreatePDF(clean_html, dest=pdf)
 
-html_to_pdf("How To Create a Slideshow.html", "output3.pdf")
-
-
-xhtml2pdf
-beautifulsoup4
+html_to_pdf("How To Create a Slideshow.html", "output4.pdf")
