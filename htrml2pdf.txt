@@ -1,0 +1,19 @@
+from xhtml2pdf import pisa
+from bs4 import BeautifulSoup
+
+def html_to_pdf(html_path, pdf_path):
+    with open(html_path, "r", encoding="utf-8", errors="ignore") as f:
+        soup = BeautifulSoup(f.read(), "html.parser")
+
+    # Remove all CSS
+    for tag in soup.find_all(["style", "link"]):
+        tag.decompose()
+
+    with open(pdf_path, "wb") as pdf:
+        pisa.CreatePDF(str(soup), dest=pdf)
+
+html_to_pdf("How To Create a Slideshow.html", "output3.pdf")
+
+
+xhtml2pdf
+beautifulsoup4
