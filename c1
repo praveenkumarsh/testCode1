@@ -1,0 +1,28 @@
+I will provide Java class code that may contain nested objects or inner classes.
+
+Your task is to extract all attributes and generate a CSV with exactly 2 columns:
+
+Parent Attribute → The class name where the field is declared
+
+Child Attribute → The field/variable name
+
+Rules:
+
+Include attributes from nested objects and inner classes
+
+Treat each class separately
+
+Ignore methods, constructors, and annotations
+
+Only include fields/variables
+
+Output strictly in CSV format
+
+Do not add explanations
+
+Example output format:
+
+ClassA,id  
+ClassA,name  
+Address,city  
+Address,pincode 
